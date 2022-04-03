@@ -1,0 +1,159 @@
+
+Para comenzar, debe tener una cuenta de AWS. Inicie sesión en su cuenta de AWS y obtenga sus credenciales de seguridad. Requeriremos estas credenciales en la última parte del tutorial. Nuestro script PHP se comunicará con los servicios de AWS a través de estas credenciales.
+
+Credenciales de AWS
+Después de esto, instale la biblioteca PHP de AWS SDK mediante el comando Composer:
+
+composer require aws/aws-sdk-php
+
+Para convertir el discurso en texto a través de Amazon Transcribe, debe tener un archivo multimedia compatible. Los formatos de medios permitidos son . Además de esto, su discurso debe estar en los idiomas compatibles. Puede ver la lista de códigos de idioma en su documentación.mp3 | mp4 | wav | flac | ogg | amr | webm
+
+La integración de Amazon Transcribe implica los siguientes pasos.
+
+Cargue el archivo multimedia en S3 Bucket.
+Cree una instancia de un cliente de Amazon Transcribe.
+Inicie un trabajo de transcripción de Amazon Transcribe. Este trabajo de transcripción requiere la URL multimedia de S3 y un identificador de trabajo único.
+El servicio Amazon Transcribe puede tardar unos minutos en finalizar el proceso de traducción. Hay que esperar.
+Descargue el archivo de texto después de que AWS complete el trabajo de transcripción.
+Veamos cómo manejar este flujo escribiendo el código PHP real.
+
+Conversión de voz a texto mediante Amazon Transcribe en PHP
+Primero, cree el formulario HTML para examinar el archivo multimedia. Al enviar el formulario, tomamos el archivo multimedia para su posterior procesamiento y enviamos un texto traducido al navegador en el formato de archivo '.txt'.
+
+<form method="post" enctype="multipart/form-data">
+    <p><input type="file" name="media" accept="audio/*,video/*" /></p>
+    <input type="submit" name="submit" value="Submit" />
+</form>
+
+
+En el extremo de PHP, debe enviar el archivo multimedia al servicio de AWS. Primero cargamos este archivo multimedia en el bucket de S3 y luego iniciamos la tarea de traducción. Incluya el entorno de AWS en su aplicación.
+
+<?php
+require 'vendor/autoload.php';  
+use Aws\S3\S3Client;
+use Aws\TranscribeService\TranscribeServiceClient;
+// process the media file
+
+A continuación, cargue el archivo multimedia en el bucket de S3 y tome la URL de S3 de los medios cargados.
+
+
+if ( isset($_POST['submit']) ) {
+     // Check if media file is supported
+    $arr_mime_types = ['mp3', 'mp4', 'wav', 'flac', 'ogg', 'amr', 'webm'];
+    $media_format = pathinfo($_FILES['media']['name'])['extension'];
+    if ( !in_array($media_format, $arr_mime_types) ) {
+        die('File type is not allowed');
+    }
+  
+    // pass AWS API credentials
+    $region = 'PASS_REGION';
+    $access_key = 'ACCESS_KEY';
+    $secret_access_key = 'SECRET_ACCESS_KEY';
+     
+    // Specify S3 bucket name
+    $bucketName = 'PASS_BUCKET_NAME';
+  
+    $key = basename($_FILES['media']['name']);
+  
+    // upload file on S3 Bucket
+    try {
+        // Instantiate an Amazon S3 client.
+        $s3 = new S3Client([
+            'version' => 'latest',
+            'region'  => $region,
+            'credentials' => [
+                'key'    => $access_key,
+                'secret' => $secret_access_key
+            ]
+        ]);
+ 
+        $result = $s3->putObject([
+            'Bucket' => $bucketName,
+            'Key'    => $key,
+            'Body'   => fopen($_FILES['media']['tmp_name'], 'r'),
+            'ACL'    => 'public-read',
+        ]);
+        $audio_url = $result->get('ObjectURL');
+  
+        // Code for Amazon Transcribe Service - Start here
+ 
+    }  catch (Exception $e) {
+        echo $e->getMessage();
+    }
+}
+
+
+Asegúrese de reemplazar los marcadores de posición con los valores reales. La URL de S3 de los medios cargados se enviará al servicio Amazon Transcribe. Para iniciar un trabajo de transcripción, requerimos un identificador de trabajo único que se puede crear a través del método.uniqid()
+
+
+
+// Create Amazon Transcribe Client
+$awsTranscribeClient = new TranscribeServiceClient([
+    'region' => $region,
+    'version' => 'latest',
+    'credentials' => [
+        'key'    => $access_key,
+        'secret' => $secret_access_key
+    ]
+]);
+ 
+// Start a Transcription Job
+$job_id = uniqid();
+$transcriptionResult = $awsTranscribeClient->startTranscriptionJob([
+        'LanguageCode' => 'en-US',
+        'Media' => [
+            'MediaFileUri' => $audio_url,
+        ],
+        'TranscriptionJobName' => $job_id,
+]);
+ 
+$status = array();
+while(true) {
+    $status = $awsTranscribeClient->getTranscriptionJob([
+        'TranscriptionJobName' => $job_id
+    ]);
+ 
+    if ($status->get('TranscriptionJob')['TranscriptionJobStatus'] == 'COMPLETED') {
+        break;
+    }
+ 
+    sleep(5);
+}
+ 
+// download the converted txt file
+
+
+En el código anterior, creamos una instancia de Amazon Transcribe Client e iniciamos el trabajo de transcripción. Puede tomar unos minutos completar la traducción. Lo he manejado dentro del bucle while usando el método. Estoy comprobando si el proceso se completa cada 5 segundos. Si se completa, estoy rompiendo el bucle.sleep()
+
+Puede ver este proceso de transcripción en el panel de AWS en los trabajos de transcripción de Amazon Transcribe =>, como se muestra en la captura de pantalla siguiente.
+Trabajo de transcripción
+Una vez que la traducción esté lista, descárguela en formato txt utilizando el siguiente código:
+$url = $status->get('TranscriptionJob')['Transcript']['TranscriptFileUri'];
+$curl = curl_init();
+curl_setopt($curl, CURLOPT_URL, $url);
+curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($curl, CURLOPT_HEADER, false);
+$data = curl_exec($curl);
+if (curl_errno($curl)) {
+    $error_msg = curl_error($curl);
+    echo $error_msg;
+}
+curl_close($curl);
+$arr_data = json_decode($data);
+ 
+// Send converted txt file to a browser
+$file = $job_id.".txt";
+$txt = fopen($file, "w") or die("Unable to open file!");
+fwrite($txt, $arr_data->results->transcripts[0]->transcript);
+fclose($txt);
+ 
+header('Content-Description: File Transfer');
+header('Content-Disposition: attachment; filename='.basename($file));
+header('Expires: 0');
+header('Cache-Control: must-revalidate');
+header('Pragma: public');
+header('Content-Length: ' . filesize($file));
+header("Content-Type: text/plain");
+readfile($file);
+exit();
+Este código envía el archivo de texto traducido al navegador que se descargará automáticamente.
